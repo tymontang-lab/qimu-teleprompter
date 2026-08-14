@@ -6,6 +6,19 @@ type Screen = "script" | "studio" | "preview";
 type FacingMode = "user" | "environment";
 type Quality = "720" | "1080";
 type VideoRatio = "original" | "9:16" | "3:4" | "1:1";
+type ScreenWakeLockSentinel = {
+  release: () => Promise<void>;
+  addEventListener: (
+    type: "release",
+    listener: () => void,
+    options?: { once?: boolean },
+  ) => void;
+};
+type NavigatorWithWakeLock = Navigator & {
+  wakeLock?: {
+    request: (type: "screen") => Promise<ScreenWakeLockSentinel>;
+  };
+};
 
 type Preferences = {
   fontSize: number;
@@ -122,6 +135,8 @@ export default function Home() {
   const [recordingUrl, setRecordingUrl] = useState("");
   const [recordingMimeType, setRecordingMimeType] = useState("video/mp4");
   const [isDraggingPrompt, setIsDraggingPrompt] = useState(false);
+  const [promptProgress, setPromptProgress] = useState(0);
+  const [promptRemainingSeconds, setPromptRemainingSeconds] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const promptViewportRef = useRef<HTMLDivElement>(null);
@@ -131,6 +146,8 @@ export default function Home() {
   const timerRef = useRef<number | null>(null);
   const scrollFrameRef = useRef<number | null>(null);
   const lastScrollTimeRef = useRef(0);
+  const scrollPositionRef = useRef(0);
+  const promptMetricsTimeRef = useRef(0);
   const countdownTokenRef = useRef(0);
   const promptDragRef = useRef<{ startY: number; startTop: number } | null>(
     null,
@@ -141,6 +158,7 @@ export default function Home() {
   const mirrorFrameRef = useRef<number | null>(null);
   const mirrorStreamRef = useRef<MediaStream | null>(null);
   const teleprompterRunningRef = useRef(false);
+  const wakeLockRef = useRef<ScreenWakeLockSentinel | null>(null);
 
   useEffect(() => {
     const restoreTimer = window.setTimeout(() => {
@@ -166,9 +184,12 @@ export default function Home() {
       "serviceWorker" in navigator &&
       !["localhost", "127.0.0.1"].includes(window.location.hostname)
     ) {
-      navigator.serviceWorker.register("./service-worker.js").catch(() => {
-        // Offline installation is optional; recording must remain available.
-      });
+      navigator.serviceWorker
+        .register("./service-worker.js")
+        .then((registration) => registration.update())
+        .catch(() => {
+          // Offline installation is optional; recording must remain available.
+        });
     }
 
     return () => window.clearTimeout(restoreTimer);
@@ -200,6 +221,54 @@ export default function Home() {
     teleprompterRunningRef.current = teleprompterRunning;
   }, [teleprompterRunning]);
 
+  const releaseWakeLock = useCallback(async () => {
+    const sentinel = wakeLockRef.current;
+    wakeLockRef.current = null;
+    if (!sentinel) return;
+    try {
+      await sentinel.release();
+    } catch {
+      // The browser may already have released it after leaving the foreground.
+    }
+  }, []);
+
+  const requestWakeLock = useCallback(async () => {
+    if (document.visibilityState !== "visible" || wakeLockRef.current) return;
+    const wakeLock = (navigator as NavigatorWithWakeLock).wakeLock;
+    if (!wakeLock) return;
+
+    try {
+      const sentinel = await wakeLock.request("screen");
+      wakeLockRef.current = sentinel;
+      sentinel.addEventListener(
+        "release",
+        () => {
+          if (wakeLockRef.current === sentinel) wakeLockRef.current = null;
+        },
+        { once: true },
+      );
+    } catch {
+      // Older Safari versions simply keep their normal screen timeout.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (screen !== "studio" || !cameraReady) {
+      void releaseWakeLock();
+      return;
+    }
+
+    void requestWakeLock();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") void requestWakeLock();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      void releaseWakeLock();
+    };
+  }, [cameraReady, releaseWakeLock, requestWakeLock, screen]);
+
   const stopScrollAnimation = useCallback(() => {
     if (scrollFrameRef.current !== null) {
       window.cancelAnimationFrame(scrollFrameRef.current);
@@ -207,23 +276,55 @@ export default function Home() {
     }
   }, []);
 
+  const updatePromptMetrics = useCallback(
+    (force = false) => {
+      const viewport = promptViewportRef.current;
+      if (!viewport) return;
+      const now = performance.now();
+      if (!force && now - promptMetricsTimeRef.current < 200) return;
+      promptMetricsTimeRef.current = now;
+
+      const scrollable = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      const current = Math.min(scrollable, Math.max(0, viewport.scrollTop));
+      const progress = scrollable ? Math.round((current / scrollable) * 100) : 0;
+      const remaining = Math.ceil(
+        Math.max(0, scrollable - current) / Math.max(1, preferences.scrollSpeed),
+      );
+      setPromptProgress(progress);
+      setPromptRemainingSeconds(remaining);
+    },
+    [preferences.scrollSpeed],
+  );
+
   useEffect(() => {
     stopScrollAnimation();
     if (!teleprompterRunning) return;
 
+    const viewport = promptViewportRef.current;
+    if (!viewport) return;
+    scrollPositionRef.current = viewport.scrollTop;
     lastScrollTimeRef.current = performance.now();
 
     const step = (now: number) => {
-      const viewport = promptViewportRef.current;
-      if (!viewport || !teleprompterRunningRef.current) return;
+      const currentViewport = promptViewportRef.current;
+      if (!currentViewport || !teleprompterRunningRef.current) return;
 
       const delta = Math.min(now - lastScrollTimeRef.current, 50);
       lastScrollTimeRef.current = now;
-      viewport.scrollTop += (preferences.scrollSpeed * delta) / 1000;
+      const maximum = Math.max(
+        0,
+        currentViewport.scrollHeight - currentViewport.clientHeight,
+      );
+      scrollPositionRef.current = Math.min(
+        maximum,
+        scrollPositionRef.current + (preferences.scrollSpeed * delta) / 1000,
+      );
+      currentViewport.scrollTop = scrollPositionRef.current;
+      updatePromptMetrics();
 
-      const atEnd =
-        viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 2;
+      const atEnd = scrollPositionRef.current >= maximum - 1;
       if (atEnd) {
+        updatePromptMetrics(true);
         setTeleprompterRunning(false);
         return;
       }
@@ -233,7 +334,25 @@ export default function Home() {
 
     scrollFrameRef.current = window.requestAnimationFrame(step);
     return stopScrollAnimation;
-  }, [preferences.scrollSpeed, stopScrollAnimation, teleprompterRunning]);
+  }, [
+    preferences.scrollSpeed,
+    stopScrollAnimation,
+    teleprompterRunning,
+    updatePromptMetrics,
+  ]);
+
+  useEffect(() => {
+    if (screen !== "studio" || !cameraReady) return;
+    const metricsTimer = window.setTimeout(() => updatePromptMetrics(true), 0);
+    return () => window.clearTimeout(metricsTimer);
+  }, [
+    cameraReady,
+    preferences.fontSize,
+    preferences.promptWidth,
+    screen,
+    script,
+    updatePromptMetrics,
+  ]);
 
   const clearRecordingTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -264,10 +383,17 @@ export default function Home() {
       stopScrollAnimation();
       clearRecordingTimer();
       stopMirrorStream();
+      void releaseWakeLock();
       streamRef.current?.getTracks().forEach((track) => track.stop());
       if (recordingUrl) URL.revokeObjectURL(recordingUrl);
     };
-  }, [clearRecordingTimer, recordingUrl, stopMirrorStream, stopScrollAnimation]);
+  }, [
+    clearRecordingTimer,
+    recordingUrl,
+    releaseWakeLock,
+    stopMirrorStream,
+    stopScrollAnimation,
+  ]);
 
   const videoConstraints = useCallback(
     (mode: FacingMode): MediaTrackConstraints => {
@@ -354,8 +480,12 @@ export default function Home() {
     setFacingMode("user");
     setConnecting(false);
     setCameraReady(true);
-    window.setTimeout(() => promptViewportRef.current?.scrollTo(0, 0), 0);
-  }, [attachStream, videoConstraints]);
+    window.setTimeout(() => {
+      promptViewportRef.current?.scrollTo(0, 0);
+      scrollPositionRef.current = 0;
+      updatePromptMetrics(true);
+    }, 0);
+  }, [attachStream, updatePromptMetrics, videoConstraints]);
 
   const leaveStudio = useCallback(() => {
     if (recording || countdown !== null) return;
@@ -627,6 +757,8 @@ export default function Home() {
     setNotice("");
     setRecordingBlob(null);
     if (promptViewportRef.current) promptViewportRef.current.scrollTop = 0;
+    scrollPositionRef.current = 0;
+    setPromptProgress(0);
     await openCamera();
   }, [openCamera]);
 
@@ -711,12 +843,32 @@ export default function Home() {
 
   const toggleTeleprompter = () => {
     if (!cameraReady || countdown !== null) return;
+    const viewport = promptViewportRef.current;
+    if (
+      !teleprompterRunningRef.current &&
+      viewport &&
+      viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 2
+    ) {
+      viewport.scrollTop = 0;
+      scrollPositionRef.current = 0;
+      updatePromptMetrics(true);
+    }
     setTeleprompterRunning((current) => !current);
   };
 
   const resetPrompt = () => {
     if (promptViewportRef.current) promptViewportRef.current.scrollTop = 0;
+    scrollPositionRef.current = 0;
+    setPromptProgress(0);
+    window.setTimeout(() => updatePromptMetrics(true), 0);
     setTeleprompterRunning(false);
+  };
+
+  const adjustScrollSpeed = (delta: number) => {
+    updatePreference(
+      "scrollSpeed",
+      Math.min(78, Math.max(12, preferences.scrollSpeed + delta)),
+    );
   };
 
   const hasScript = script.trim().length > 0;
@@ -889,9 +1041,23 @@ export default function Home() {
                   }}
                   onPointerMove={(event) => {
                     const gesture = promptScrollGestureRef.current;
-                    if (gesture && Math.abs(event.clientY - gesture.startY) > 8) {
+                    if (
+                      gesture &&
+                      !gesture.moved &&
+                      Math.abs(event.clientY - gesture.startY) > 8
+                    ) {
                       gesture.moved = true;
+                      if (teleprompterRunningRef.current) {
+                        setTeleprompterRunning(false);
+                      }
                     }
+                  }}
+                  onPointerCancel={() => {
+                    promptScrollGestureRef.current = null;
+                  }}
+                  onScroll={(event) => {
+                    scrollPositionRef.current = event.currentTarget.scrollTop;
+                    updatePromptMetrics();
                   }}
                   onClick={() => {
                     const gesture = promptScrollGestureRef.current;
@@ -918,6 +1084,16 @@ export default function Home() {
                 >
                   {teleprompterRunning ? "Ⅱ" : "▶"}
                 </button>
+                <div
+                  className="prompt-progress-status"
+                  aria-label={`文稿进度 ${promptProgress}%，预计剩余 ${formatTime(promptRemainingSeconds)}`}
+                >
+                  <span>{promptProgress}%</span>
+                  <span>剩余 {formatTime(promptRemainingSeconds)}</span>
+                </div>
+                <div className="prompt-progress-track" aria-hidden="true">
+                  <span style={{ width: `${promptProgress}%` }} />
+                </div>
               </div>
             )}
 
@@ -1002,13 +1178,29 @@ export default function Home() {
               )}
 
               {recording && (
-                <button
-                  type="button"
-                  className="teleprompter-toggle"
-                  onClick={toggleTeleprompter}
-                >
-                  {teleprompterRunning ? "暂停提词" : "继续提词"}
-                </button>
+                <div className="live-prompt-controls" aria-label="录像中提词控制">
+                  <button
+                    type="button"
+                    onClick={() => adjustScrollSpeed(-5)}
+                    aria-label="减慢提词"
+                  >
+                    慢一点
+                  </button>
+                  <button
+                    type="button"
+                    className="teleprompter-toggle"
+                    onClick={toggleTeleprompter}
+                  >
+                    {teleprompterRunning ? "暂停提词" : "继续提词"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => adjustScrollSpeed(5)}
+                    aria-label="加快提词"
+                  >
+                    快一点
+                  </button>
+                </div>
               )}
 
               <button
