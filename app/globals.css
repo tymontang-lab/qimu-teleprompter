@@ -552,6 +552,40 @@ button:disabled {
   font-size: 10px;
 }
 
+.prompt-progress-status {
+  position: absolute;
+  bottom: 10px;
+  left: 11px;
+  display: flex;
+  gap: 7px;
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.prompt-progress-track {
+  position: absolute;
+  right: 13px;
+  bottom: 0;
+  left: 13px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+}
+
+.prompt-progress-track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.78);
+  transition: width 0.2s linear;
+}
+
 .countdown {
   position: absolute;
   z-index: 20;
@@ -773,6 +807,42 @@ input[type="range"] {
   font-weight: 650;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
+}
+
+.live-prompt-controls {
+  display: grid;
+  grid-template-columns: auto minmax(100px, 1fr) auto;
+  gap: 1px;
+  overflow: hidden;
+  margin-bottom: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.live-prompt-controls > button {
+  height: 36px;
+  border: 0;
+  padding: 0 13px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.live-prompt-controls .teleprompter-toggle {
+  min-width: 100px;
+  margin: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.16);
+  border-left: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  font-size: 12px;
 }
 
 /* Settings sheet */
