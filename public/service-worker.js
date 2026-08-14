@@ -1,4 +1,4 @@
-const CACHE_NAME = "qimu-v1";
+const CACHE_NAME = "qimu-v2";
 const APP_SHELL = [
   "./",
   "./manifest.json",
