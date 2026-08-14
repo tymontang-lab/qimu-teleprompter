@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 type Screen = "script" | "studio" | "preview";
 type FacingMode = "user" | "environment";
 type Quality = "720" | "1080";
+type VideoRatio = "original" | "9:16" | "3:4" | "1:1";
 
 type Preferences = {
   fontSize: number;
@@ -14,6 +15,7 @@ type Preferences = {
   previewMirror: boolean;
   recordMirror: boolean;
   quality: Quality;
+  videoRatio: VideoRatio;
 };
 
 const DEFAULT_SCRIPT = "";
@@ -25,7 +27,32 @@ const DEFAULT_PREFERENCES: Preferences = {
   previewMirror: true,
   recordMirror: false,
   quality: "1080",
+  videoRatio: "original",
 };
+
+const VIDEO_RATIO_OPTIONS: { value: VideoRatio; label: string }[] = [
+  { value: "original", label: "完整" },
+  { value: "9:16", label: "9:16" },
+  { value: "3:4", label: "3:4" },
+  { value: "1:1", label: "1:1" },
+];
+
+const sourceCaptureWidth = (quality: Quality) =>
+  quality === "1080" ? 1080 : 720;
+
+const fixedOutputSize = (quality: Quality, ratio: Exclude<VideoRatio, "original">) => {
+  const shortEdge = quality === "1080" ? 1080 : 720;
+
+  if (ratio === "9:16") {
+    return { width: shortEdge, height: quality === "1080" ? 1920 : 1280 };
+  }
+  if (ratio === "3:4") {
+    return { width: shortEdge, height: quality === "1080" ? 1440 : 960 };
+  }
+  return { width: shortEdge, height: shortEdge };
+};
+
+const evenPixel = (value: number) => Math.max(2, Math.round(value / 2) * 2);
 
 const STORAGE_KEYS = {
   script: "qimu:last-script",
@@ -244,16 +271,9 @@ export default function Home() {
 
   const videoConstraints = useCallback(
     (mode: FacingMode): MediaTrackConstraints => {
-      const size =
-        preferences.quality === "1080"
-          ? { width: 1080, height: 1920 }
-          : { width: 720, height: 1280 };
-
       return {
         facingMode: { ideal: mode },
-        width: { ideal: size.width },
-        height: { ideal: size.height },
-        aspectRatio: { ideal: 9 / 16 },
+        width: { ideal: sourceCaptureWidth(preferences.quality) },
         frameRate: { ideal: 30, max: 30 },
       };
     },
@@ -390,7 +410,7 @@ export default function Home() {
     videoConstraints,
   ]);
 
-  const createMirroredRecordingStream = useCallback(() => {
+  const createProcessedRecordingStream = useCallback(() => {
     const sourceVideo = videoRef.current;
     const sourceStream = streamRef.current;
     if (!sourceVideo || !sourceStream) {
@@ -398,10 +418,19 @@ export default function Home() {
     }
 
     const canvas = document.createElement("canvas");
+    const videoTrack = sourceStream.getVideoTracks()[0];
+    const trackSettings = videoTrack?.getSettings();
+    const sourceWidth = sourceVideo.videoWidth || trackSettings?.width || 1280;
+    const sourceHeight = sourceVideo.videoHeight || trackSettings?.height || 720;
+    const maxEdge = preferences.quality === "1080" ? 1920 : 1280;
+    const originalScale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight));
     const outputSize =
-      preferences.quality === "1080"
-        ? { width: 1080, height: 1920 }
-        : { width: 720, height: 1280 };
+      preferences.videoRatio === "original"
+        ? {
+            width: evenPixel(sourceWidth * originalScale),
+            height: evenPixel(sourceHeight * originalScale),
+          }
+        : fixedOutputSize(preferences.quality, preferences.videoRatio);
     canvas.width = outputSize.width;
     canvas.height = outputSize.height;
 
@@ -410,31 +439,35 @@ export default function Home() {
     };
     const context = canvas.getContext("2d", { alpha: false });
     if (!context || !captureCanvas.captureStream) {
-      throw new Error("Mirror recording is not supported");
+      throw new Error("Processed recording is not supported");
     }
 
     const drawFrame = () => {
       if (sourceVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-        const sourceWidth = sourceVideo.videoWidth;
-        const sourceHeight = sourceVideo.videoHeight;
+        const currentSourceWidth = sourceVideo.videoWidth || sourceWidth;
+        const currentSourceHeight = sourceVideo.videoHeight || sourceHeight;
         const targetAspect = canvas.width / canvas.height;
-        const sourceAspect = sourceWidth / sourceHeight;
+        const sourceAspect = currentSourceWidth / currentSourceHeight;
         let sx = 0;
         let sy = 0;
-        let sw = sourceWidth;
-        let sh = sourceHeight;
+        let sw = currentSourceWidth;
+        let sh = currentSourceHeight;
 
-        if (sourceAspect > targetAspect) {
-          sw = sourceHeight * targetAspect;
-          sx = (sourceWidth - sw) / 2;
-        } else {
-          sh = sourceWidth / targetAspect;
-          sy = (sourceHeight - sh) / 2;
+        if (preferences.videoRatio !== "original") {
+          if (sourceAspect > targetAspect) {
+            sw = currentSourceHeight * targetAspect;
+            sx = (currentSourceWidth - sw) / 2;
+          } else {
+            sh = currentSourceWidth / targetAspect;
+            sy = (currentSourceHeight - sh) / 2;
+          }
         }
 
         context.save();
-        context.translate(canvas.width, 0);
-        context.scale(-1, 1);
+        if (preferences.recordMirror) {
+          context.translate(canvas.width, 0);
+          context.scale(-1, 1);
+        }
         context.drawImage(
           sourceVideo,
           sx,
@@ -459,7 +492,7 @@ export default function Home() {
     ]);
     mirrorStreamRef.current = outputStream;
     return outputStream;
-  }, [preferences.quality]);
+  }, [preferences.quality, preferences.recordMirror, preferences.videoRatio]);
 
   const finishRecording = useCallback(
     (recorder: MediaRecorder) => {
@@ -496,8 +529,10 @@ export default function Home() {
     const sourceStream = streamRef.current;
     if (!sourceStream) throw new Error("Camera stream is not ready");
 
-    const recordingStream = preferences.recordMirror
-      ? createMirroredRecordingStream()
+    const needsProcessing =
+      preferences.recordMirror || preferences.videoRatio !== "original";
+    const recordingStream = needsProcessing
+      ? createProcessedRecordingStream()
       : sourceStream;
     const mimeType = pickMimeType();
     let recorder: MediaRecorder;
@@ -533,9 +568,10 @@ export default function Home() {
     }, 250);
   }, [
     clearRecordingTimer,
-    createMirroredRecordingStream,
+    createProcessedRecordingStream,
     finishRecording,
     preferences.recordMirror,
+    preferences.videoRatio,
   ]);
 
   const startRecording = useCallback(async () => {
@@ -558,8 +594,8 @@ export default function Home() {
     } catch {
       stopMirrorStream();
       setNotice(
-        preferences.recordMirror
-          ? "此设备无法生成镜像视频，请在设置中关闭“录制镜像”后重试。"
+        preferences.recordMirror || preferences.videoRatio !== "original"
+          ? "此设备无法处理所选比例，请选择“完整”并关闭“录制镜像”后重试。"
           : "录制启动失败，请重新尝试。",
       );
     }
@@ -569,6 +605,7 @@ export default function Home() {
     connecting,
     countdown,
     preferences.recordMirror,
+    preferences.videoRatio,
     recording,
     stopMirrorStream,
   ]);
@@ -637,15 +674,9 @@ export default function Home() {
     const track = streamRef.current?.getVideoTracks()[0];
     if (!track?.applyConstraints) return;
 
-    const size =
-      quality === "1080"
-        ? { width: 1080, height: 1920 }
-        : { width: 720, height: 1280 };
     try {
       await track.applyConstraints({
-        width: { ideal: size.width },
-        height: { ideal: size.height },
-        aspectRatio: { ideal: 9 / 16 },
+        width: { ideal: sourceCaptureWidth(quality) },
         frameRate: { ideal: 30, max: 30 },
       });
     } catch {
@@ -761,18 +792,24 @@ export default function Home() {
       {screen === "studio" && (
         <section className="studio-screen" aria-label="提词录像">
           <div className="camera-stage">
-            <video
-              ref={videoRef}
-              className={`camera-preview ${
-                preferences.previewMirror && facingMode === "user"
-                  ? "camera-preview--mirrored"
-                  : ""
-              }`}
-              autoPlay
-              muted
-              playsInline
-              onClick={() => void videoRef.current?.play()}
-            />
+            <div className="camera-layer">
+              <div
+                className={`camera-viewport camera-viewport--${preferences.videoRatio.replace(":", "-")}`}
+              >
+                <video
+                  ref={videoRef}
+                  className={`camera-preview ${
+                    preferences.previewMirror && facingMode === "user"
+                      ? "camera-preview--mirrored"
+                      : ""
+                  }`}
+                  autoPlay
+                  muted
+                  playsInline
+                  onClick={() => void videoRef.current?.play()}
+                />
+              </div>
+            </div>
 
             <div className="studio-scrim" aria-hidden="true" />
 
@@ -1060,6 +1097,28 @@ export default function Home() {
 
                 <div className="setting-block">
                   <div className="setting-label">
+                    <strong>视频比例</strong>
+                    <span>“完整”不裁切，可避免镜头看起来放大</span>
+                  </div>
+                  <div className="segmented-control segmented-control--ratios">
+                    {VIDEO_RATIO_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={
+                          preferences.videoRatio === option.value ? "is-active" : ""
+                        }
+                        aria-pressed={preferences.videoRatio === option.value}
+                        onClick={() => updatePreference("videoRatio", option.value)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="setting-block">
+                  <div className="setting-label">
                     <strong>清晰度</strong>
                     <span>优先 30fps，设备会自动降级</span>
                   </div>
@@ -1140,7 +1199,9 @@ export default function Home() {
             </div>
           </header>
 
-          <div className="video-review">
+          <div
+            className={`video-review video-review--${preferences.videoRatio.replace(":", "-")}`}
+          >
             <video src={recordingUrl} controls playsInline preload="metadata">
               <track kind="captions" srcLang="zh-CN" label="未提供字幕" />
             </video>

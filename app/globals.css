@@ -314,6 +314,42 @@ button:disabled {
   background: #080808;
 }
 
+.camera-layer {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: #080808;
+}
+
+.camera-viewport {
+  position: relative;
+  flex: none;
+  overflow: hidden;
+  background: #080808;
+}
+
+.camera-viewport--original {
+  width: 100%;
+  height: 100%;
+}
+
+.camera-viewport--9-16 {
+  width: min(100%, 56.25dvh);
+  aspect-ratio: 9 / 16;
+}
+
+.camera-viewport--3-4 {
+  width: min(100%, 75dvh);
+  aspect-ratio: 3 / 4;
+}
+
+.camera-viewport--1-1 {
+  width: min(100%, 100dvh);
+  aspect-ratio: 1;
+}
+
 .camera-preview {
   position: absolute;
   inset: 0;
@@ -322,6 +358,10 @@ button:disabled {
   border: 0;
   object-fit: cover;
   background: #080808;
+}
+
+.camera-viewport--original .camera-preview {
+  object-fit: contain;
 }
 
 .camera-preview--mirrored {
@@ -859,6 +899,10 @@ input[type="range"] {
   background: #e4e4e0;
 }
 
+.segmented-control--ratios {
+  grid-template-columns: repeat(4, 1fr);
+}
+
 .segmented-control button {
   height: 37px;
   border: 0;
@@ -931,12 +975,23 @@ input[type="range"] {
   display: block;
   width: 100%;
   max-height: 64dvh;
-  aspect-ratio: 9 / 16;
   border: 1px solid #2b2b2b;
   border-radius: 22px;
   background: #000;
   object-fit: contain;
   box-shadow: 0 25px 70px rgba(0, 0, 0, 0.42);
+}
+
+.video-review--9-16 video {
+  aspect-ratio: 9 / 16;
+}
+
+.video-review--3-4 video {
+  aspect-ratio: 3 / 4;
+}
+
+.video-review--1-1 video {
+  aspect-ratio: 1;
 }
 
 .clean-video-badge {
